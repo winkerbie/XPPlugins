@@ -14,12 +14,14 @@
 #define PLUGIN_DESCRIPTION  "Does away with X-Plane's idiotic centered little box " \
                             "for mouse steering that has caused much grieve and "   \
                             "countless loss of virtual lives."
-#define PLUGIN_VERSION      "1.5"
+#define PLUGIN_VERSION      "1.7"
 
 #define RUDDER_DEFL_DIST    200
 #define RUDDER_RET_SPEED    2.0f
 
 static XPLMCommandRef toggle_yoke_control;
+static XPLMCommandRef rudder_left;
+static XPLMCommandRef rudder_right;
 static XPLMDataRef yoke_pitch_ratio;
 static XPLMDataRef yoke_roll_ratio;
 static XPLMDataRef yoke_heading_ratio;
@@ -29,6 +31,8 @@ static int screen_width;
 static int screen_height;
 static int yoke_control_enabled;
 static int rudder_control;
+static int centre_control;
+static int bind_rudder;
 static float magenta[] = { 1.0f, 0, 1.0f };
 static float green[] = { 0, 1.0f, 0 };
 static int set_pos;
@@ -39,6 +43,7 @@ static int rudder_return;
 static int rudder_defl_dist;
 static float yaw_ratio;
 static float rudder_ret_spd;
+static float yoke_nz;
 #ifdef IBM
 static HWND xp_hwnd;
 static HCURSOR yoke_cursor;
@@ -61,6 +66,10 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
     strcpy(desc, PLUGIN_DESCRIPTION);
     toggle_yoke_control = XPLMCreateCommand("BetterMouseYoke/ToggleYokeControl",
         "Toggle mouse yoke control");
+	rudder_left = XPLMCreateCommand("BetterMouseYoke/RudderLeft",
+		"Move Rudder Left");
+	rudder_right = XPLMCreateCommand("BetterMouseYoke/RudderRight",
+		"Move Rudder Right");
     yoke_pitch_ratio = XPLMFindDataRef("sim/cockpit2/controls/yoke_pitch_ratio");
     if (yoke_pitch_ratio == NULL) {
         _log("init fail: could not find yoke_pitch_ratio dataref");
@@ -93,6 +102,8 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
     }
     rudder_defl_dist = ini_geti("rudder_deflection_distance", RUDDER_DEFL_DIST);
     rudder_ret_spd = ini_getf("rudder_return_speed", RUDDER_RET_SPEED);
+	yoke_nz = ini_getf("yoke_null_zone", 0.05);
+	centre_control = ini_geti("centre_control", 0);
 #ifdef IBM
     xp_hwnd = FindWindowA("X-System", "X-System");
     if (!xp_hwnd) {
@@ -144,6 +155,10 @@ PLUGIN_API void XPluginStop(void) {
 PLUGIN_API int XPluginEnable(void) {
     XPLMRegisterCommandHandler(toggle_yoke_control, toggle_yoke_control_cb,
         0, NULL);
+	XPLMRegisterCommandHandler(rudder_left, rudder_left_cb,
+		0, NULL);
+	XPLMRegisterCommandHandler(rudder_right, rudder_right_cb,
+		0, NULL);
     XPLMRegisterDrawCallback(draw_cb, xplm_Phase_Window, 0, NULL);
     XPLMCreateFlightLoop_t params = {
         .structSize = sizeof(XPLMCreateFlightLoop_t),
@@ -163,6 +178,10 @@ PLUGIN_API int XPluginEnable(void) {
 PLUGIN_API void XPluginDisable(void) {
     XPLMUnregisterCommandHandler(toggle_yoke_control, toggle_yoke_control_cb,
         0, NULL);
+	XPLMUnregisterCommandHandler(rudder_left, rudder_left_cb,
+		0, NULL);
+	XPLMUnregisterCommandHandler(rudder_right, rudder_right_cb,
+		0, NULL);
     XPLMSetDatai(eq_pfc_yoke, 0);
     XPLMUnregisterDrawCallback(draw_cb, xplm_Phase_Window, 0, NULL);
     if (loop_id)
@@ -194,7 +213,9 @@ int init_menu() {
         { "Set Yoke Cursor", "set_pos", &set_pos, 1 },
         { "Set Rudder Cursor", "set_rudder_pos", &set_rudder_pos, 1 },
         { "Change Cursor Icon", "change_cursor", &change_cursor, 1 },
-        { "Return Rudder", "rudder_return", &rudder_return, 1 }
+        { "Return Rudder", "rudder_return", &rudder_return, 1 },
+		{ "Restore Centre", "centre_control", &centre_control, 0},
+		{ "Bind Rudder", "bind_rudder", &bind_rudder, 0}
     };
     int num = sizeof(items) / sizeof(items[0]);
 
@@ -225,10 +246,42 @@ int toggle_yoke_control_cb(XPLMCommandRef cmd, XPLMCommandPhase phase, void *ref
     return 1;
 }
 
+int rudder_left_cb(XPLMCommandRef cmd, XPLMCommandPhase phase, void *ref) {
+	if (yoke_control_enabled == 0 && bind_rudder == 1)
+			return 1;
+
+	// set the rudder position from kbd
+	if ((phase == xplm_CommandContinue || xplm_CommandBegin) && rudder_control != 1) {
+		yaw_ratio = -1;
+		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+	}
+	else if (yoke_control_enabled == 0)	{ // this runs when loop call is not enable
+		yaw_ratio = 0;
+		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+	}
+	return 1;
+}
+
+int rudder_right_cb(XPLMCommandRef cmd, XPLMCommandPhase phase, void *ref) {
+	if (yoke_control_enabled == 0 && bind_rudder == 1)
+		return 1;
+
+	// set the rudder position from kbd
+	if ((phase == xplm_CommandContinue || xplm_CommandBegin) && rudder_control != 1) {
+		yaw_ratio = 1;
+		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+	}
+	else if (yoke_control_enabled == 0) { // this runs when loop call is not enable
+		yaw_ratio = 0;
+		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+	}
+	return 1;
+}
+
 int draw_cb(XPLMDrawingPhase phase, int before, void *ref) {
     /* Show a little text indication in top left corner of screen. */
     if (yoke_control_enabled) {
-        XPLMDrawString(magenta, 20, screen_height - 40, rudder_control ?
+        XPLMDrawString(magenta, 20, screen_height - 10, rudder_control ?
             "MOUSE RUDDER CONTROL" : "MOUSE YOKE CONTROL",
             NULL, xplmFont_Proportional);
         if (rudder_control) {
@@ -240,6 +293,11 @@ int draw_cb(XPLMDrawingPhase phase, int before, void *ref) {
                     cursor_pos[1] + 4 - 7 * i, "|", NULL, xplmFont_Basic);
             }
         }
+		else {
+			/* Draw cross to indicate control centre */
+			XPLMDrawString(green, screen_width/2,
+				screen_height/2, "+", NULL, xplmFont_Basic);
+		}
     }
     return 1;
 }
@@ -248,6 +306,13 @@ float loop_cb(float last_call, float last_loop, int count, void *ref) {
     static long long _last_time;
     /* If user has disabled mouse yoke control, suspend loop. */
     if (yoke_control_enabled == 0) {
+
+		/* Centre controls if selected */
+		if (centre_control) {
+			XPLMSetDataf(yoke_roll_ratio, 0);
+			XPLMSetDataf(yoke_pitch_ratio, 0);
+		}
+
         /* If rudder is still deflected, move it gradually back to zero. */
         if (yaw_ratio != 0 && rudder_return) {
             long long now = get_time_ms();
@@ -271,11 +336,23 @@ float loop_cb(float last_call, float last_loop, int count, void *ref) {
         /* Save value so we don't have to continuously query the dr above. */
         yaw_ratio = dist / (float)rudder_defl_dist;
         XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
-    } else {
+    } 
+	else {
         float yoke_roll = 2 * (m_x / (float)screen_width) - 1;
         float yoke_pitch = 1 - 2 * (m_y / (float)screen_height);
-        XPLMSetDataf(yoke_roll_ratio, yoke_roll);
-        XPLMSetDataf(yoke_pitch_ratio, yoke_pitch);
+
+		// ignore if within null zone (default 0.05)
+		if (yoke_roll > yoke_nz || yoke_roll < -yoke_nz) {
+			XPLMSetDataf(yoke_roll_ratio, yoke_roll);
+		} else {
+			XPLMSetDataf(yoke_roll_ratio, 0);
+		}
+		if (yoke_pitch > yoke_nz || yoke_pitch < -yoke_nz) {
+			XPLMSetDataf(yoke_pitch_ratio, yoke_pitch);
+		} else {
+			XPLMSetDataf(yoke_pitch_ratio, 0);
+		}
+
         /* If rudder is still deflected, move it gradually back to zero. */
         if (yaw_ratio != 0 && rudder_return) {
             long long now = get_time_ms();
