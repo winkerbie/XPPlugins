@@ -14,7 +14,7 @@
 #define PLUGIN_DESCRIPTION  "Does away with X-Plane's idiotic centered little box " \
                             "for mouse steering that has caused much grieve and "   \
                             "countless loss of virtual lives."
-#define PLUGIN_VERSION      "1.7"
+#define PLUGIN_VERSION      "1.95"
 
 #define RUDDER_DEFL_DIST    200
 #define RUDDER_RET_SPEED    2.0f
@@ -41,9 +41,12 @@ static int cursor_pos[2];
 static int set_rudder_pos;
 static int rudder_return;
 static int rudder_defl_dist;
+static bool kbd_rudder_on;
+static float kbd_rudder_speed;
 static float yaw_ratio;
 static float rudder_ret_spd;
 static float yoke_nz;
+static long long _last_time;
 #ifdef IBM
 static HWND xp_hwnd;
 static HCURSOR yoke_cursor;
@@ -104,6 +107,7 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
     rudder_ret_spd = ini_getf("rudder_return_speed", RUDDER_RET_SPEED);
 	yoke_nz = ini_getf("yoke_null_zone", 0.05);
 	centre_control = ini_geti("centre_control", 0);
+	kbd_rudder_speed = ini_getf("rudder_dfl_speed", 0.15);
 #ifdef IBM
     xp_hwnd = FindWindowA("X-System", "X-System");
     if (!xp_hwnd) {
@@ -210,12 +214,13 @@ PLUGIN_API void XPluginReceiveMessage(XPLMPluginID from, int msg, void *param) {
 
 int init_menu() {
     menu_item_t items[] = {
+		{ "Version 1.8" },
         { "Set Yoke Cursor", "set_pos", &set_pos, 1 },
         { "Set Rudder Cursor", "set_rudder_pos", &set_rudder_pos, 1 },
         { "Change Cursor Icon", "change_cursor", &change_cursor, 1 },
-        { "Return Rudder", "rudder_return", &rudder_return, 1 },
-		{ "Restore Centre", "centre_control", &centre_control, 0},
-		{ "Bind Rudder", "bind_rudder", &bind_rudder, 0}
+        { "Rudder Center", "rudder_return", &rudder_return, 1 },
+		{ "Yoke Center", "centre_control", &centre_control, 0},
+		{ "Bind Kbd Rudder to Yoke", "bind_rudder", &bind_rudder, 0}		
     };
     int num = sizeof(items) / sizeof(items[0]);
 
@@ -248,16 +253,31 @@ int toggle_yoke_control_cb(XPLMCommandRef cmd, XPLMCommandPhase phase, void *ref
 
 int rudder_left_cb(XPLMCommandRef cmd, XPLMCommandPhase phase, void *ref) {
 	if (yoke_control_enabled == 0 && bind_rudder == 1)
-			return 1;
+		return 1;
+	if (rudder_control == 1) // ignore kbd input if mouse rudder control active
+		return 1;
 
 	// set the rudder position from kbd
-	if ((phase == xplm_CommandContinue || xplm_CommandBegin) && rudder_control != 1) {
-		yaw_ratio = -1;
+	if (phase == xplm_CommandBegin) {
+		yaw_ratio = -(kbd_rudder_speed);
+		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+		kbd_rudder_on = true;
+	}
+	else if (phase == xplm_CommandContinue)	{
+		yaw_ratio = yaw_ratio - kbd_rudder_speed; //smooth deflection
+		yaw_ratio < -1 ? yaw_ratio = -1 : 0;
 		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
 	}
-	else if (yoke_control_enabled == 0)	{ // this runs when loop call is not enable
-		yaw_ratio = 0;
-		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+	else if (yoke_control_enabled == 0)	{ // this runs when loop call is not enabled
+		//yaw_ratio = 0;
+		//XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+		kbd_rudder_on = false;
+		_last_time = get_time_ms();
+		XPLMScheduleFlightLoop(loop_id, -1.0f, 0);
+	}
+	else {
+		kbd_rudder_on = false;
+		_last_time = get_time_ms();
 	}
 	return 1;
 }
@@ -265,15 +285,30 @@ int rudder_left_cb(XPLMCommandRef cmd, XPLMCommandPhase phase, void *ref) {
 int rudder_right_cb(XPLMCommandRef cmd, XPLMCommandPhase phase, void *ref) {
 	if (yoke_control_enabled == 0 && bind_rudder == 1)
 		return 1;
+	if (rudder_control == 1) // ignore kbd input if mouse rudder control active
+		return 1;
 
 	// set the rudder position from kbd
-	if ((phase == xplm_CommandContinue || xplm_CommandBegin) && rudder_control != 1) {
-		yaw_ratio = 1;
+	if (phase == xplm_CommandBegin) {
+		yaw_ratio = kbd_rudder_speed;
+		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+		kbd_rudder_on = true;
+	}
+	else if (phase == xplm_CommandContinue) {
+		yaw_ratio = yaw_ratio + kbd_rudder_speed; // smooth deflection
+		yaw_ratio > 1 ? yaw_ratio = 1 : 0;
 		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
 	}
-	else if (yoke_control_enabled == 0) { // this runs when loop call is not enable
-		yaw_ratio = 0;
-		XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+	else if (yoke_control_enabled == 0) { // this runs when loop call is not enabled
+		//yaw_ratio = 0;
+		//XPLMSetDataf(yoke_heading_ratio, yaw_ratio);
+		kbd_rudder_on = false;
+		_last_time = get_time_ms();
+		XPLMScheduleFlightLoop(loop_id, -1.0f, 0);
+	}
+	else {
+		kbd_rudder_on = false;
+		_last_time = get_time_ms();
 	}
 	return 1;
 }
@@ -303,7 +338,7 @@ int draw_cb(XPLMDrawingPhase phase, int before, void *ref) {
 }
 
 float loop_cb(float last_call, float last_loop, int count, void *ref) {
-    static long long _last_time;
+    
     /* If user has disabled mouse yoke control, suspend loop. */
     if (yoke_control_enabled == 0) {
 
@@ -353,8 +388,8 @@ float loop_cb(float last_call, float last_loop, int count, void *ref) {
 			XPLMSetDataf(yoke_pitch_ratio, 0);
 		}
 
-        /* If rudder is still deflected, move it gradually back to zero. */
-        if (yaw_ratio != 0 && rudder_return) {
+        /* If rudder is still deflected, move it gradually back to zero. Ignore if keyboard rudder on. */
+        if (yaw_ratio != 0 && rudder_return && !kbd_rudder_on) {
             long long now = get_time_ms();
             float dt = (now - _last_time) / 1000.0f;
             _last_time = now;
